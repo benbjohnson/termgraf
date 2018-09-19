@@ -1,0 +1,7 @@
+from(bucket:"telegraf/autogen")
+  |> range(start:{{.Range.Start}}, stop:{{.Range.Stop}})
+  |> filter(fn:(r) => r._measurement == "cpu" and r._field == "usage_user" and r.cpu == "cpu-total")
+  |> window(every: {{.Window.Every}}, start:now())
+  |> mean()
+  |> group(none: true)
+  |> yield()

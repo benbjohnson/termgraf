@@ -3,11 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"text/template"
 	"time"
 
 	ui "github.com/gizak/termui"
@@ -19,19 +24,19 @@ import (
 	"github.com/influxdata/platform/query"
 )
 
-// const host =
-const host = "http://bcddb52e.ngrok.io:80"
-
-var (
-	host       string
-	q          string
-	columnName string
-
-	sparklines *ui.Sparklines
-	datasets   []*Dataset
+const (
+	BorderThickness = 1
 )
 
-var queryService = &http.FluxQueryService{URL: host}
+var (
+	mu sync.Mutex
+
+	config       = DefaultConfig()
+	queryService = &http.FluxQueryService{}
+
+	sparklinesMap = make(map[*Widget]*ui.Sparklines)
+	datasetsMap   = make(map[*Widget][]*Dataset)
+)
 
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err == flag.ErrHelp {
@@ -45,13 +50,16 @@ func main() {
 func run(ctx context.Context, args []string) error {
 	// Parse flags.
 	fs := flag.NewFlagSet("termgraf", flag.ContinueOnError)
-	fs.StringVar(&host, "host", "http://localhost:8086", "host URL")
-	fs.StringVar(&q, "query", "", "flux script")
-	fs.StringVar(&columnName, "column", "_value", "column name")
+	fs.StringVar(&queryService.URL, "host", "http://localhost:8086", "host URL")
+	configFile := fs.String("config", "", "config file")
 	if err := fs.Parse(args); err != nil {
 		return err
-	} else if q == "" {
-		return errors.New("query required")
+	} else if *configFile == "" {
+		return errors.New("config required")
+	}
+
+	if err := ReadConfigFile(*configFile, &config); err != nil {
+		return err
 	}
 
 	if err := ui.Init(); err != nil {
@@ -62,7 +70,7 @@ func run(ctx context.Context, args []string) error {
 	initHandlers()
 	initBody()
 	render()
-	go runTimer()
+	runTimers()
 
 	ui.Loop()
 	return nil
@@ -72,7 +80,6 @@ func initHandlers() {
 	// Exit on "q" or CTRL-C.
 	ui.Handle("q", func(ui.Event) { ui.StopLoop() })
 	ui.Handle("<C-c>", func(ui.Event) { ui.StopLoop() })
-	ui.Handle("r", func(ui.Event) { update() })
 
 	ui.Handle("<Resize>", func(e ui.Event) {
 		ui.Body.Width = e.Payload.(ui.Resize).Width
@@ -80,25 +87,38 @@ func initHandlers() {
 		ui.Clear()
 		render()
 	})
-
-	ui.Handle("/timer/10s", func(ui.Event) { render() })
 }
 
 func initBody() {
-	sparklines = ui.NewSparklines()
-	sparklines.Height = 20
-	sparklines.BorderLabel = "termgraf"
-
-	ui.Body.AddRows(
-		ui.NewRow(
-			ui.NewCol(12, 0, sparklines),
-		),
-	)
-
+	for _, row := range config.Rows {
+		r := &ui.Row{Span: 12}
+		for _, widget := range row.Widgets {
+			sparklines := ui.NewSparklines()
+			sparklines.Height = (widget.Limit * (widget.Height + 1)) + (BorderThickness * 2)
+			sparklines.BorderLabel = widget.Title
+			sparklinesMap[widget] = sparklines
+			r.Cols = append(r.Cols, ui.NewCol(widget.Span, 0, sparklines))
+		}
+		ui.Body.AddRows(r)
+	}
 	ui.Body.Align()
 }
 
 func render() {
+	for _, row := range config.Rows {
+		for _, widget := range row.Widgets {
+			renderWidget(widget)
+		}
+	}
+}
+
+func renderWidget(widget *Widget) {
+	mu.Lock()
+	datasets := datasetsMap[widget]
+	mu.Unlock()
+
+	sparklines := sparklinesMap[widget]
+
 	// Remove sparklines if too many.
 	if len(sparklines.Lines) > len(datasets) {
 		sparklines.Lines = sparklines.Lines[:len(datasets)]
@@ -107,9 +127,9 @@ func render() {
 	// Add sparklines as needed.
 	for i := len(sparklines.Lines); i < len(datasets); i++ {
 		sparklines.Add(ui.Sparkline{
-			Height:     1,
-			TitleColor: ui.ColorGreen,
-			LineColor:  ui.ColorGreen,
+			Height:     widget.Height,
+			TitleColor: LookupColor(widget.Color),
+			LineColor:  LookupColor(widget.Color),
 		})
 	}
 
@@ -120,16 +140,30 @@ func render() {
 		sparkline.Data = ds.Values
 	}
 
-	// ui.Clear()
 	ui.Render(ui.Body)
 }
 
-func update() {
+func update(widget *Widget) {
 	ctx := context.Background()
+
+	// Process variables in template.
+	var buf bytes.Buffer
+	if err := widget.queryTemplate.Execute(&buf, &TemplateData{
+		Range: TemplateRange{
+			Start: "-40s",
+			Stop:  "-10s",
+		},
+		Window: TemplateWindow{
+			Every: "1s",
+		},
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
 
 	// Execute the flux query.
 	itr, err := queryService.Query(ctx, &query.Request{
-		Compiler: lang.FluxCompiler{Query: q},
+		Compiler: lang.FluxCompiler{Query: buf.String()},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -137,7 +171,7 @@ func update() {
 	}
 	defer itr.Cancel()
 
-	datasets = nil
+	var datasets []*Dataset
 	for itr.More() {
 		result := itr.Next()
 		tables := result.Tables()
@@ -146,6 +180,11 @@ func update() {
 			ds := &Dataset{Title: FormatDatasetTitle(tbl)}
 
 			if err := tbl.Do(func(cr flux.ColReader) error {
+				columnName := widget.Column
+				if columnName == "" {
+					columnName = "_value"
+				}
+
 				idx := execute.ColIdx(columnName, cr.Cols())
 				if idx == -1 {
 					return nil
@@ -183,15 +222,27 @@ func update() {
 		return
 	}
 
+	mu.Lock()
+	datasetsMap[widget] = datasets
+	mu.Unlock()
+
 	render()
 }
 
-func runTimer() {
+func runTimers() {
+	for _, row := range config.Rows {
+		for i := range row.Widgets {
+			widget := row.Widgets[i]
+			go runWidgetTimer(widget)
+		}
+	}
+}
+
+func runWidgetTimer(widget *Widget) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-
 	for range ticker.C {
-		update()
+		update(widget)
 	}
 }
 
@@ -220,4 +271,99 @@ func ColType(label string, cols []flux.ColMeta) flux.DataType {
 		}
 	}
 	return flux.TInvalid
+}
+
+type Config struct {
+	Rows []*Row `json:"rows"`
+}
+
+type Row struct {
+	Widgets []*Widget `json:"widgets"`
+}
+
+type Widget struct {
+	queryTemplate *template.Template `json:"-"`
+
+	Title  string `json:"title"`
+	Query  string `json:"query"`
+	Column string `json:"column"`
+	Color  string `json:"color"`
+	Height int    `json:"height"`
+	Span   int    `json:"span"`
+	Limit  int    `json:"limit"`
+}
+
+func DefaultConfig() Config {
+	return Config{}
+}
+
+func ReadConfigFile(filename string, config *Config) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if err := json.NewDecoder(f).Decode(config); err != nil {
+		return err
+	}
+
+	for _, row := range config.Rows {
+		for _, widget := range row.Widgets {
+			if widget.Height < 1 {
+				widget.Height = 1
+			}
+
+			if strings.HasPrefix(widget.Query, "@") {
+				buf, err := ioutil.ReadFile(filepath.Join(filepath.Dir(filename), widget.Query[1:]))
+				if err != nil {
+					return err
+				}
+
+				tmpl, err := template.New("main").Parse(string(buf))
+				if err != nil {
+					return err
+				}
+				widget.queryTemplate = tmpl
+			}
+		}
+	}
+	return nil
+}
+
+func LookupColor(s string) ui.Attribute {
+	switch s {
+	case "black":
+		return ui.ColorBlack
+	case "red":
+		return ui.ColorRed
+	case "green":
+		return ui.ColorGreen
+	case "yellow":
+		return ui.ColorYellow
+	case "blue":
+		return ui.ColorBlue
+	case "magenta":
+		return ui.ColorMagenta
+	case "cyan":
+		return ui.ColorCyan
+	case "white":
+		return ui.ColorWhite
+	default:
+		return ui.ColorGreen
+	}
+}
+
+type TemplateData struct {
+	Window TemplateWindow
+	Range  TemplateRange
+}
+
+type TemplateRange struct {
+	Start string
+	Stop  string
+}
+
+type TemplateWindow struct {
+	Every string
 }

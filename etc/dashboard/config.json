@@ -1,0 +1,38 @@
+{
+	"rows": [
+		{
+			"widgets": [
+				{
+					"title": "%user",
+					"query": "@cpu.user.total.flux",
+					"color": "cyan",
+					"height": 7,
+					"span": 3,
+					"limit": 1
+				},
+				{
+					"title": "%user",
+					"query": "@cpu.user.flux",
+					"color": "cyan",
+					"span": 3,
+					"limit": 4
+				},
+				{
+					"title": "%user",
+					"query": "@cpu.system.total.flux",
+					"color": "red",
+					"height": 7,
+					"span": 3,
+					"limit": 1
+				},
+				{
+					"title": "%system",
+					"query": "@cpu.system.flux",
+					"color": "red",
+					"span": 3,
+					"limit": 4
+				}
+			]
+		}
+	]
+}
