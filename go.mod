@@ -6,6 +6,7 @@ require (
 	github.com/coreos/bbolt v1.3.0 // indirect
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible // indirect
 	github.com/elazarl/go-bindata-assetfs v1.0.0 // indirect
+	github.com/gizak/termui v0.0.0-20180919000000-fede2b0a7496f62f701fff3ea518ffd0740cf580
 	github.com/google/go-github v17.0.0+incompatible // indirect
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/influxdata/flux v0.0.0-20180917192926-272ec9cad23d
@@ -15,6 +16,10 @@ require (
 	github.com/jessevdk/go-flags v1.4.0 // indirect
 	github.com/jsternberg/zap-logfmt v1.2.0 // indirect
 	github.com/julienschmidt/httprouter v0.0.0-20180715161854-348b672cd90d // indirect
+	github.com/maruel/panicparse v1.1.1 // indirect
+	github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b // indirect
+	github.com/mitchellh/go-wordwrap v1.0.0 // indirect
+	github.com/nsf/termbox-go v0.0.0-20180819125858-b66b20ab708e // indirect
 	github.com/sirupsen/logrus v1.0.6 // indirect
 	github.com/tylerb/graceful v1.2.15 // indirect
 	golang.org/x/crypto v0.0.0-20180910181607-0e37d006457b // indirect
